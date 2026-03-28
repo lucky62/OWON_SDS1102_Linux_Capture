@@ -3,8 +3,8 @@
 Python program to download measured data from OWON SDS1102 oscilloscope.
 
 It was created by some reverse engeneering and with AI support.
-
-
+Tested on Linux Mint 22.3 Zena, Python 3.12.3
+Scope connection via ttyUSB0 is hardcoded.
 
 <img width="775" height="645" alt="image" src="https://github.com/user-attachments/assets/ecdaa203-41f8-41e1-8c44-ded1e888d781" />
 
