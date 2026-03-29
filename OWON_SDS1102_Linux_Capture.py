@@ -179,15 +179,13 @@ class OwonScopeGUI:
 
                 v_min, v_max = np.min(volt_wave), np.max(volt_wave)
 
-                # Y axis ticks: one tick per division (v_scale volts)
-                y_ticks = np.arange(
-                    np.ceil(v_min_lim / v_scale) * v_scale,
-                    v_max_lim + v_scale * 0.5,
-                    v_scale * probe
-                )
-
-                # Format effective volts/div (scale * probe) as human-readable string
+                # Y axis ticks: integer multiples of v_per_div within visible range
                 v_per_div = v_scale * probe
+                first_tick = int(np.ceil(v_min_lim / v_per_div))
+                last_tick  = int(np.floor(v_max_lim / v_per_div))
+                y_ticks = np.array([i * v_per_div for i in range(first_tick, last_tick + 1)])
+
+                # Format effective volts/div as human-readable string
                 if v_per_div >= 1.0:
                     v_label = f"{v_per_div:.3g}V/div"
                 else:
@@ -195,6 +193,7 @@ class OwonScopeGUI:
 
                 if name == 'CH1':
                     self.ax1.plot(t_vec * xf, volt_wave, color='#FFFF00', label='CH1', linewidth=1)
+                    self.ax1.axhline(0, color='#FFFF00', linewidth=0.5, linestyle='-')
                     self.ax1.set_ylabel(f"CH1 [{v_label}]", color='#FFFF00')
                     self.ax1.set_ylim(v_min_lim, v_max_lim)
                     self.ax1.set_yticks(y_ticks)
@@ -202,14 +201,21 @@ class OwonScopeGUI:
                     self.stat_ch1.config(text=f"CH1: Max {v_max:.3f}V  Min {v_min:.3f}V  raw[{raw_min},{raw_max}]")
                 else:
                     self.ax2.plot(t_vec * xf, volt_wave, color='#00FFFF', label='CH2', linewidth=1)
+                    self.ax2.axhline(0, color='#00FFFF', linewidth=0.5, linestyle='-')
                     self.ax2.set_ylabel(f"CH2 [{v_label}]", color='#00FFFF')
                     self.ax2.set_ylim(v_min_lim, v_max_lim)
                     self.ax2.set_yticks(y_ticks)
                     self.ax2.tick_params(axis='y', labelcolor='#00FFFF')
                     self.stat_ch2.config(text=f"CH2: Max {v_max:.3f}V  Min {v_min:.3f}V  raw[{raw_min},{raw_max}]")
             else:
-                if name == 'CH1': self.stat_ch1.config(text="CH1: [OFF]")
-                else: self.stat_ch2.config(text="CH2: [OFF]")
+                if name == 'CH1':
+                    self.ax1.set_yticks([])
+                    self.ax1.set_ylabel("")
+                    self.stat_ch1.config(text="CH1: [OFF]")
+                else:
+                    self.ax2.set_yticks([])
+                    self.ax2.set_ylabel("")
+                    self.stat_ch2.config(text="CH2: [OFF]")
 
         # X axis ticks: one tick per division
         t_total = t_vec[-1] * xf
