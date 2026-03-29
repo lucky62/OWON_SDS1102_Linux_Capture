@@ -29,6 +29,11 @@ class OwonScopeGUI:
         self.is_running = True
         self.current_config = None
         self.channel_data = {}
+        self.x_min = None   # current view window in display units
+        self.x_max = None
+        self.t_total = None # full data range in display units
+        self.xf = 1.0       # time scale factor for display
+        self._pan_start = None  # x position when pan started
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
 
@@ -73,6 +78,10 @@ class OwonScopeGUI:
         self.canvas = FigureCanvasTkAgg(self.fig, master=self.root)
         self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=1, padx=10, pady=10)
         
+        self.canvas.mpl_connect('scroll_event', self._on_scroll)
+        self.canvas.mpl_connect('button_press_event', self._on_pan_start)
+        self.canvas.mpl_connect('button_release_event', self._on_pan_end)
+        self.canvas.mpl_connect('motion_notify_event', self._on_pan_move)
         self.reset_axes()
 
     def reset_axes(self):
@@ -141,6 +150,10 @@ class OwonScopeGUI:
         self.current_config, self.channel_data = config, data
         
         self.ax1.clear(); self.ax2.clear()
+        self.canvas.mpl_connect('scroll_event', self._on_scroll)
+        self.canvas.mpl_connect('button_press_event', self._on_pan_start)
+        self.canvas.mpl_connect('button_release_event', self._on_pan_end)
+        self.canvas.mpl_connect('motion_notify_event', self._on_pan_move)
         self.reset_axes()
 
         # Timebase
@@ -217,11 +230,20 @@ class OwonScopeGUI:
                     self.ax2.set_ylabel("")
                     self.stat_ch2.config(text="CH2: [OFF]")
 
-        # X axis ticks: one tick per division
+        # X axis ticks and zoom window
         t_total = t_vec[-1] * xf
-        x_ticks = np.arange(0, t_total + t_scale_disp * 0.5, t_scale_disp)
-        self.ax1.set_xticks(x_ticks)
-        self.ax1.set_xlim(0, t_total)
+        self.t_total = t_total
+        self.xf = xf
+        self.xu = xu
+        self.t_scale_disp = t_scale_disp
+        self.timebase_scale_str = config['TIMEBASE']['SCALE']
+        # Initialize view to full range on first load or after new data
+        if self.x_min is None or self.x_max is None:
+            self.x_min, self.x_max = 0.0, t_total
+        # Clamp to valid range
+        self.x_min = max(0.0, self.x_min)
+        self.x_max = min(t_total, self.x_max)
+        self._apply_xlim()
 
         self.ax1.set_xlabel(f"Time [{xu}]  (1 div = {config['TIMEBASE']['SCALE']})", color='#888888')
         self.ax1.set_title(f"OWON SDS1102 | Base: {config['TIMEBASE']['SCALE']}/div | {config['RUNSTATUS']}", color='white', fontsize=10)
@@ -231,6 +253,71 @@ class OwonScopeGUI:
         if h1 + h2:
             self.ax1.legend(h1 + h2, l1 + l2, loc='upper right', facecolor='#1e1e1e', framealpha=0.9)
         self.canvas.draw()
+
+    def _apply_xlim(self):
+        """Apply current x_min/x_max to axes and update ticks."""
+        x_min, x_max = self.x_min, self.x_max
+        self.ax1.set_xlim(x_min, x_max)
+        # Ticks: integer multiples of t_scale_disp within view
+        first = int(np.ceil(x_min / self.t_scale_disp))
+        last  = int(np.floor(x_max / self.t_scale_disp))
+        x_ticks = [i * self.t_scale_disp for i in range(first, last + 1)]
+        self.ax1.set_xticks(x_ticks)
+        self.canvas.draw_idle()
+
+    def _on_scroll(self, event):
+        if self.t_total is None or event.xdata is None: return
+        span = self.x_max - self.x_min
+        # Pixel width of axes to compute max zoom (1 sample per pixel)
+        ax_width_px = self.ax1.get_window_extent().width
+        samples = self.current_config['SAMPLE']['DATALEN'] if self.current_config else 1
+        min_span = self.t_total / max(samples, 1) * ax_width_px  # 1 sample per pixel
+
+        if event.key == 'shift':
+            # Horizontal pan: one tick step per scroll click
+            step = self.t_scale_disp * (1 if event.button == 'down' else -1)
+            new_min = max(0.0, self.x_min + step)
+            new_max = new_min + span
+            if new_max > self.t_total:
+                new_max = self.t_total
+                new_min = new_max - span
+            self.x_min, self.x_max = new_min, new_max
+        else:
+            # Zoom around cursor position
+            factor = 1.3 if event.button == 'down' else 1.0 / 1.3
+            new_span = span * factor
+            new_span = max(min_span, min(new_span, self.t_total))
+            cursor = max(x_min := event.xdata, self.x_min)
+            ratio = (cursor - self.x_min) / span
+            new_min = cursor - ratio * new_span
+            new_max = new_min + new_span
+            if new_min < 0.0:
+                new_min, new_max = 0.0, new_span
+            if new_max > self.t_total:
+                new_max = self.t_total
+                new_min = new_max - new_span
+            self.x_min, self.x_max = new_min, new_max
+        self._apply_xlim()
+
+    def _on_pan_start(self, event):
+        if event.button == 1 and event.xdata is not None:
+            self._pan_start = event.xdata
+
+    def _on_pan_end(self, event):
+        self._pan_start = None
+
+    def _on_pan_move(self, event):
+        if self._pan_start is None or event.xdata is None: return
+        dx = self._pan_start - event.xdata
+        span = self.x_max - self.x_min
+        new_min = max(0.0, self.x_min + dx)
+        new_max = new_min + span
+        if new_max > self.t_total:
+            new_max = self.t_total
+            new_min = new_max - span
+        self.x_min, self.x_max = new_min, new_max
+        self._pan_start = event.xdata  # update anchor
+        self._apply_xlim()
 
     def manual_download(self):
         self.btn_download.config(state=tk.DISABLED)
