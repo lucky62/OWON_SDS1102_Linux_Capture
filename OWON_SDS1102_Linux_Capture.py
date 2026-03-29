@@ -186,16 +186,23 @@ class OwonScopeGUI:
                     v_scale * probe
                 )
 
+                # Format effective volts/div (scale * probe) as human-readable string
+                v_per_div = v_scale * probe
+                if v_per_div >= 1.0:
+                    v_label = f"{v_per_div:.3g}V/div"
+                else:
+                    v_label = f"{v_per_div * 1000:.3g}mV/div"
+
                 if name == 'CH1':
                     self.ax1.plot(t_vec * xf, volt_wave, color='#FFFF00', label='CH1', linewidth=1)
-                    self.ax1.set_ylabel(f"CH1 [{ch['SCALE']}/div]", color='#FFFF00')
+                    self.ax1.set_ylabel(f"CH1 [{v_label}]", color='#FFFF00')
                     self.ax1.set_ylim(v_min_lim, v_max_lim)
                     self.ax1.set_yticks(y_ticks)
                     self.ax1.tick_params(axis='y', labelcolor='#FFFF00')
                     self.stat_ch1.config(text=f"CH1: Max {v_max:.3f}V  Min {v_min:.3f}V  raw[{raw_min},{raw_max}]")
                 else:
                     self.ax2.plot(t_vec * xf, volt_wave, color='#00FFFF', label='CH2', linewidth=1)
-                    self.ax2.set_ylabel(f"CH2 [{ch['SCALE']}/div]", color='#00FFFF')
+                    self.ax2.set_ylabel(f"CH2 [{v_label}]", color='#00FFFF')
                     self.ax2.set_ylim(v_min_lim, v_max_lim)
                     self.ax2.set_yticks(y_ticks)
                     self.ax2.tick_params(axis='y', labelcolor='#00FFFF')
