@@ -16,6 +16,7 @@ Scope connection via ttyUSB0 is hardcoded.
 - One time download of measured data from scope
 - Continuous download (Start, Stop)
 - Save downloaded data to the files (image and JSON)
+- Time Zooming and Panning
 
 ### JSON file example:
 ```
