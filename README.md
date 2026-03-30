@@ -69,5 +69,5 @@ Scope connection via ttyUSB0 is hardcoded.
 }
 ```
 
-## Licence:
+## License:
 - totally free for any use.
