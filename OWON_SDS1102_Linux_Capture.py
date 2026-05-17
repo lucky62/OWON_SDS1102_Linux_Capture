@@ -11,6 +11,37 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import numpy as np
 import threading
 import re
+import platform
+
+CONFIG_PATH = os.path.join(
+    os.environ.get('APPDATA', os.path.expanduser('~/.config')) if platform.system() == 'Windows'
+    else os.path.expanduser('~/.config'),
+    'owon_scope', 'settings.json'
+)
+
+DEFAULTS = {
+    'output_dir':    os.path.expanduser('~'),
+    'file_name':     'scope_capture',
+    'batch_count':   '10',
+    'save_png':      True,
+    'save_json':     True,
+}
+
+def load_settings():
+    try:
+        with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        return {**DEFAULTS, **data}
+    except Exception:
+        return dict(DEFAULTS)
+
+def save_settings(cfg):
+    try:
+        os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+        with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
+            json.dump(cfg, f, indent=4, ensure_ascii=False)
+    except Exception as e:
+        sys.stderr.write(f"Settings save error: {e}\n")
 
 class OwonScopeGUI:
     def __init__(self, root):
@@ -23,6 +54,7 @@ class OwonScopeGUI:
         self.style.theme_use('clam')
         self.root.configure(bg=self.style.lookup('TFrame', 'background'))
 
+        self._cfg = load_settings()
         self.stop_event = threading.Event()
         self.port = "/dev/ttyUSB0"
         self.is_auto_refreshing = False
@@ -31,9 +63,11 @@ class OwonScopeGUI:
         self.channel_data = {}
         self.x_min = None   # current view window in display units
         self.x_max = None
-        self.t_total = None # full data range in display units
-        self.xf = 1.0       # time scale factor for display
+        self.t_total = None      # full data range in display units
+        self.t_scale_disp = None  # current timebase in display units
+        self.xf = 1.0             # time scale factor for display
         self._pan_start = None  # x position when pan started
+        self._batch_running = False
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
 
@@ -43,20 +77,51 @@ class OwonScopeGUI:
 
         self.btn_download = ttk.Button(top_frame, text="Download Now", command=self.manual_download)
         self.btn_download.pack(side=tk.LEFT, padx=5)
-
         self.btn_start = ttk.Button(top_frame, text="▶ Start Live", command=self.start_auto)
         self.btn_start.pack(side=tk.LEFT, padx=5)
-
         self.btn_stop = ttk.Button(top_frame, text="■ Stop", command=self.stop_auto, state=tk.DISABLED)
         self.btn_stop.pack(side=tk.LEFT, padx=5)
 
-        ttk.Separator(top_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=15)
-        self.entry_filename = ttk.Entry(top_frame, width=20)
-        self.entry_filename.insert(0, "scope_capture")
-        self.entry_filename.pack(side=tk.LEFT, padx=5)
+        ttk.Separator(top_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=10)
 
-        self.btn_save = ttk.Button(top_frame, text="Save Data", command=self.save_to_file)
+        # Output directory selector (shared)
+        ttk.Label(top_frame, text="Dir:").pack(side=tk.LEFT)
+        self.entry_out_dir = ttk.Entry(top_frame, width=24)
+        self.entry_out_dir.insert(0, self._cfg['output_dir'])
+        self.entry_out_dir.pack(side=tk.LEFT, padx=3)
+        ttk.Button(top_frame, text="…", width=2,
+                   command=self._browse_dir).pack(side=tk.LEFT, padx=2)
+
+        ttk.Separator(top_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=10)
+
+        # File name (shared between single save and batch)
+        ttk.Label(top_frame, text="Name:").pack(side=tk.LEFT)
+        self.entry_filename = ttk.Entry(top_frame, width=16)
+        self.entry_filename.insert(0, self._cfg['file_name'])
+        self.entry_filename.pack(side=tk.LEFT, padx=3)
+
+        self.var_save_png = tk.BooleanVar(value=self._cfg['save_png'])
+        ttk.Checkbutton(top_frame, text="PNG", variable=self.var_save_png).pack(side=tk.LEFT, padx=3)
+        self.var_save_json = tk.BooleanVar(value=self._cfg['save_json'])
+        ttk.Checkbutton(top_frame, text="JSON", variable=self.var_save_json).pack(side=tk.LEFT, padx=3)
+
+        self.btn_save = ttk.Button(top_frame, text="Save", command=self.save_to_file)
         self.btn_save.pack(side=tk.LEFT, padx=5)
+
+        ttk.Separator(top_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=10)
+
+        # --- Batch section (same row) ---
+        ttk.Label(top_frame, text="Batch count:").pack(side=tk.LEFT)
+        self.entry_batch_count = ttk.Entry(top_frame, width=5)
+        self.entry_batch_count.insert(0, self._cfg['batch_count'])
+        self.entry_batch_count.pack(side=tk.LEFT, padx=3)
+        self.btn_batch = ttk.Button(top_frame, text="▶ Batch", command=self.start_batch)
+        self.btn_batch.pack(side=tk.LEFT, padx=4)
+        self.btn_batch_stop = ttk.Button(top_frame, text="■", width=2,
+                                         command=self.stop_batch, state=tk.DISABLED)
+        self.btn_batch_stop.pack(side=tk.LEFT, padx=2)
+        self.lbl_batch_progress = ttk.Label(top_frame, text="")
+        self.lbl_batch_progress.pack(side=tk.LEFT, padx=6)
 
         # --- Status Bar (Moved above the plot, black background) ---
         self.status_bar = tk.Frame(root, bg="black", height=35, padx=10)
@@ -109,6 +174,7 @@ class OwonScopeGUI:
         return n
 
     def on_closing(self):
+        self._persist_settings()
         self.is_auto_refreshing = False
         self.stop_event.set()
         try:
@@ -232,17 +298,28 @@ class OwonScopeGUI:
 
         # X axis ticks and zoom window
         t_total = t_vec[-1] * xf
-        self.t_total = t_total
-        self.xf = xf
-        self.xu = xu
-        self.t_scale_disp = t_scale_disp
-        self.timebase_scale_str = config['TIMEBASE']['SCALE']
-        # Initialize view to full range on first load or after new data
-        if self.x_min is None or self.x_max is None:
+        # Save previous values before overwriting for change detection
+        prev_total      = self.t_total
+        prev_scale_disp = self.t_scale_disp
+        self.t_total    = t_total
+        self.xf         = xf
+        self.xu         = xu
+        self.t_scale_disp          = t_scale_disp
+        self.timebase_scale_str    = config['TIMEBASE']['SCALE']
+        # Reset view when timebase or data length changes, otherwise keep zoom/pan
+        timebase_changed = (
+            prev_total is None
+            or prev_scale_disp is None
+            or abs(t_total - prev_total) > 1e-12
+            or abs(t_scale_disp - prev_scale_disp) > 1e-15
+        )
+        if self.x_min is None or self.x_max is None or timebase_changed:
             self.x_min, self.x_max = 0.0, t_total
-        # Clamp to valid range
-        self.x_min = max(0.0, self.x_min)
-        self.x_max = min(t_total, self.x_max)
+        else:
+            self.x_min = max(0.0, self.x_min)
+            self.x_max = min(t_total, self.x_max)
+            if self.x_max <= self.x_min:
+                self.x_min, self.x_max = 0.0, t_total
         self._apply_xlim()
 
         self.ax1.set_xlabel(f"Time [{xu}]  (1 div = {config['TIMEBASE']['SCALE']})", color='#888888')
@@ -350,16 +427,155 @@ class OwonScopeGUI:
         self.btn_start.config(state=tk.NORMAL); self.btn_download.config(state=tk.NORMAL)
         self.btn_stop.config(state=tk.DISABLED); self.stat_msg.config(text="Ready", fg="#00FF00")
 
+    def _browse_dir(self):
+        d = filedialog.askdirectory(initialdir=self.entry_out_dir.get())
+        if d:
+            self.entry_out_dir.delete(0, tk.END)
+            self.entry_out_dir.insert(0, d)
+            self._persist_settings()
+
+    def _persist_settings(self):
+        save_settings({
+            'output_dir':  self.entry_out_dir.get(),
+            'file_name':   self.entry_filename.get(),
+            'batch_count': self.entry_batch_count.get(),
+            'save_png':    self.var_save_png.get(),
+            'save_json':   self.var_save_json.get(),
+        })
+
     def save_to_file(self):
         if not self.channel_data: return
-        path = filedialog.asksaveasfilename(initialfile=self.entry_filename.get(), defaultextension=".png", filetypes=[("PNG", "*.png")])
-        if path:
-            try:
-                self.fig.savefig(path, facecolor='#1e1e1e', dpi=150)
-                with open(os.path.splitext(path)[0] + ".json", 'w', encoding='utf-8') as f:
-                    json.dump(self.current_config, f, indent=4, ensure_ascii=False)
-            except Exception as e:
-                sys.stderr.write(f"Error: {e}\n")
+        directory = self.entry_out_dir.get()
+        stem = os.path.join(directory, self.entry_filename.get())
+        try:
+            if self.var_save_png.get():
+                self.fig.savefig(stem + ".png", facecolor='#1e1e1e', dpi=150)
+            if self.var_save_json.get():
+                enriched = self._enrich_config(self.current_config, self.channel_data)
+                with open(stem + ".json", 'w', encoding='utf-8') as f:
+                    json.dump(enriched, f, indent=4, ensure_ascii=False)
+        except Exception as e:
+            sys.stderr.write(f"Error: {e}\n")
+        self._persist_settings()
+
+    def _enrich_config(self, config, data):
+        """Return a copy of config with raw_min/raw_max added to each active channel."""
+        import copy
+        out = copy.deepcopy(config)
+        datalen = config['SAMPLE']['DATALEN']
+        for ch in out['CHANNEL']:
+            name = ch['NAME']
+            if name in data:
+                raw = data[name][:datalen]
+                ch['RAW_MIN'] = int(np.min(raw))
+                ch['RAW_MAX'] = int(np.max(raw))
+        return out
+
+    def _save_capture(self, directory, base_name, index, config, data):
+        stem = os.path.join(directory, f"{base_name}_{index:03d}")
+        if self.var_save_png.get():
+            self.fig.savefig(stem + ".png", facecolor='#1e1e1e', dpi=150)
+        if self.var_save_json.get():
+            enriched = self._enrich_config(config, data)
+            with open(stem + ".json", 'w', encoding='utf-8') as f:
+                json.dump(enriched, f, indent=4, ensure_ascii=False)
+
+    def _volt_wave(self, ch, data, datalen):
+        raw_wave = data[ch['NAME']][:datalen].astype(float)
+        v_scale = self.parse_value(ch['SCALE'])
+        probe_match = re.findall(r"(\d+)", ch['PROBE'])
+        probe = float(probe_match[0]) if probe_match else 1.0
+        offset_units = float(ch['OFFSET'])
+        zero_raw = (offset_units / 50.0) * (4096.0 / 10.0)
+        return (raw_wave - zero_raw) / (4096.0 / 10.0) * v_scale * probe
+
+    def _compute_stats(self, all_results):
+        stats = {}
+        for ch_name in ('CH1', 'CH2'):
+            for stat_key, volt_fn, raw_fn in [
+                ('max', lambda vw: float(np.max(vw)), lambda r: int(np.max(r))),
+                ('min', lambda vw: float(np.min(vw)), lambda r: int(np.min(r))),
+            ]:
+                volt_vals, raw_vals = [], []
+                for config, data in all_results:
+                    datalen = config['SAMPLE']['DATALEN']
+                    for ch in config['CHANNEL']:
+                        if ch['NAME'] == ch_name and ch_name in data:
+                            vw = self._volt_wave(ch, data, datalen)
+                            volt_vals.append(volt_fn(vw))
+                            raw_vals.append(raw_fn(data[ch_name][:datalen]))
+                if volt_vals:
+                    stats[f"{ch_name}_{stat_key}"] = {
+                        'maximum': max(volt_vals),
+                        'center':  sum(volt_vals) / len(volt_vals),
+                        'minimum': min(volt_vals),
+                        'raw_maximum': max(raw_vals),
+                        'raw_center':  round(sum(raw_vals) / len(raw_vals)),
+                        'raw_minimum': min(raw_vals),
+                    }
+        return stats
+
+    def start_batch(self):
+        if self._batch_running: return
+        try:
+            count = int(self.entry_batch_count.get())
+            assert count > 0
+        except Exception:
+            self.lbl_batch_progress.config(text="Invalid count!")
+            return
+        directory = self.entry_out_dir.get().strip() or os.path.expanduser('~')
+        base_name = self.entry_filename.get().strip() or "capture"
+        os.makedirs(directory, exist_ok=True)
+        self._persist_settings()
+        self._batch_running = True
+        self.btn_batch.config(state=tk.DISABLED)
+        self.btn_batch_stop.config(state=tk.NORMAL)
+
+        def task():
+            all_results = []
+            for i in range(1, count + 1):
+                if not self._batch_running: break
+                self.root.after(0, lambda i=i: self.lbl_batch_progress.config(
+                    text=f"Capturing {i}/{count}..."))
+                res = self.fetch_data()
+                if res:
+                    config, data = res
+                    all_results.append((config, data))
+                    # update_ui and save must both run in main thread (matplotlib not thread-safe)
+                    saved = threading.Event()
+                    def _update_and_save(r=res, idx=i, ev=saved):
+                        self.update_ui(r[0], r[1])
+                        try:
+                            self._save_capture(directory, base_name, idx, r[0], r[1])
+                        except Exception as e:
+                            sys.stderr.write(f"Save error: {e}\n")
+                        ev.set()
+                    self.root.after(0, _update_and_save)
+                    saved.wait(timeout=15)
+                else:
+                    self.root.after(0, lambda i=i: self.lbl_batch_progress.config(
+                        text=f"Timeout at {i}/{count}"))
+                    time.sleep(0.5)
+            if all_results:
+                try:
+                    stats = self._compute_stats(all_results)
+                    with open(os.path.join(directory, "statistics.json"), 'w', encoding='utf-8') as f:
+                        json.dump(stats, f, indent=4, ensure_ascii=False)
+                except Exception as e:
+                    sys.stderr.write(f"Stats error: {e}\n")
+            n = len(all_results)
+            self.root.after(0, lambda: self.lbl_batch_progress.config(
+                text=f"Done: {n}/{count} saved to '{directory}'"))
+            self.root.after(0, lambda: self.btn_batch.config(state=tk.NORMAL))
+            self.root.after(0, lambda: self.btn_batch_stop.config(state=tk.DISABLED))
+            self._batch_running = False
+
+        threading.Thread(target=task, daemon=True).start()
+
+    def stop_batch(self):
+        self._batch_running = False
+        self.btn_batch_stop.config(state=tk.DISABLED)
+        self.lbl_batch_progress.config(text="Stopping...")
 
 if __name__ == "__main__":
     root = tk.Tk()
